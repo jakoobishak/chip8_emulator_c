@@ -7,32 +7,39 @@
 #include "SDL.h"
 
 typedef struct {
-    SDL_Window *window;
-    SDL_Renderer *renderer;
-    SDL_AudioSpec want, have;
-    SDL_AudioDeviceID dev;
+    SDL_Window          *window;
+    SDL_Renderer        *renderer;
+    SDL_AudioSpec       want, have;
+    SDL_AudioDeviceID   dev;
 } sdl_t;
-
-typedef struct {
-    char    *window_title;
-    uint32_t window_width;
-    uint32_t window_height;
-    uint32_t fg_color;
-    uint32_t bg_color;
-    uint32_t scale_factor;
-    bool     pixel_outlines;
-    uint32_t insts_per_sec;
-    uint32_t square_wave_freq;
-    uint32_t audio_sample_rate;
-    int16_t  volume;
-    float    color_lerp_rate;
-} config_t;
 
 typedef enum {
     QUIT = 0,
     RUNNING,
     PAUSED,
 } emulator_state_t;
+
+typedef enum {
+    CHIP8,
+    SUPERCHIP,
+    XOCHIP,
+} extension_t;
+
+typedef struct {
+    char        *window_title;
+    uint32_t    window_width;
+    uint32_t    window_height;
+    uint32_t    fg_color;
+    uint32_t    bg_color;
+    uint32_t    scale_factor;
+    bool        pixel_outlines;
+    uint32_t    insts_per_sec;
+    uint32_t    square_wave_freq;
+    uint32_t    audio_sample_rate;
+    int16_t     volume;
+    float       color_lerp_rate;
+    extension_t current_extension;
+} config_t;
 
 typedef struct {
     uint16_t    opcode;
@@ -163,6 +170,7 @@ bool set_config_from_args(config_t *config, const int argc, char **argv)
         .audio_sample_rate  = 44100,
         .volume             = 3000,
         .color_lerp_rate    = 0.7,
+        .current_extension  = CHIP8,
     };
 
     int8_t i;
@@ -704,6 +712,7 @@ void print_debug_info(chip8_t *chip8)
 
 void emulate_instruction(chip8_t *chip8, const config_t config)
 {
+    bool carry;
     chip8->inst.opcode = (chip8->ram[chip8->PC] << 8 | chip8->ram[chip8->PC + 1]);
     chip8->PC += 2;
 
@@ -784,22 +793,28 @@ void emulate_instruction(chip8_t *chip8, const config_t config)
         case 0x1:
             // 8XY1: Sets VX to VX or VY
             chip8->V[chip8->inst.X] |= chip8->V[chip8->inst.Y];
+            if (config.current_extension == CHIP8)
+                chip8->V[0xF] = 0;
             break;
         
         case 0x2:
             // 8XY2: Sets VX to VX and VY
             chip8->V[chip8->inst.X] &= chip8->V[chip8->inst.Y];
+            if (config.current_extension == CHIP8)
+                chip8->V[0xF] = 0;
             break;
         
         case 0x3:
             // 8XY3: Sets VX to VX xor VY
             chip8->V[chip8->inst.X] ^= chip8->V[chip8->inst.Y];
+            if (config.current_extension == CHIP8)
+                chip8->V[0xF] = 0;
             break;
         
         case 0x4:
             // 8XY4: Adds VY to VX
             // VF is set to 1 when there's a carry, and to 0 when there is not 
-            const bool carry = ((uint16_t)(chip8->V[chip8->inst.X] + chip8->V[chip8->inst.Y]) > 255);
+            carry = ((uint16_t)(chip8->V[chip8->inst.X] + chip8->V[chip8->inst.Y]) > 255);
 
             chip8->V[chip8->inst.X] += chip8->V[chip8->inst.Y];
             chip8->V[0xF] = carry;
@@ -808,29 +823,45 @@ void emulate_instruction(chip8_t *chip8, const config_t config)
         case 0x5:
             // 8XY5: VY is subtracted from VX
             // VF is set to 0 when there's a borrow, and 1 when there is not
-            chip8->V[0xF] = (chip8->V[chip8->inst.Y] <= chip8->V[chip8->inst.X]);           
+            carry = (chip8->V[chip8->inst.Y] <= chip8->V[chip8->inst.X]);
+
             chip8->V[chip8->inst.X] -= chip8->V[chip8->inst.Y];
+            chip8->V[0xF] = carry;
             break;
         
         case 0x6:
             // 8XY6: Stores the most significant bit of VX in VF
             // and then shifts VX to the left by 1
-            chip8->V[0xF] = (chip8->V[chip8->inst.X] & 1);
-            chip8->V[chip8->inst.X] >>= 1;
+            if (config.current_extension == CHIP8) {
+                carry = (chip8->V[chip8->inst.Y] & 1);
+                chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] >> 1;
+            } else {
+                carry = (chip8->V[chip8->inst.X] & 1);
+                chip8->V[chip8->inst.X] >>= 1;
+            }
+            chip8->V[0xF] = carry;
             break;
         
         case 0x7:
             // 8XY7: Sets VX to VY minus VX. VF is set to 0 
             // when there's a borrow, and 1 when there is not.
-            chip8->V[0xF] = (chip8->V[chip8->inst.X] <= chip8->V[chip8->inst.Y]);
+            carry = (chip8->V[chip8->inst.X] <= chip8->V[chip8->inst.Y]);
+            
             chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] - chip8->V[chip8->inst.X];
+            chip8->V[0xF] = carry;
             break;
         
         case 0xE:
             // 8XYE: Stores the most significant bit of VX in VF 
             // and then shifts VX to the left by 1.
-            chip8->V[0xF] = (chip8->V[chip8->inst.X] & 0x80) >> 7;
-            chip8->V[chip8->inst.X] <<= 1;
+            if (config.current_extension == CHIP8) {
+                carry = (chip8->V[chip8->inst.Y] & 0x80) >> 7;
+                chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] << 1;
+            } else {
+                carry = (chip8->V[chip8->inst.X] & 0x80) >> 7;
+                chip8->V[chip8->inst.X] <<= 1;
+            }
+            chip8->V[0xF] = carry;
             break;
 
         default:
@@ -931,17 +962,29 @@ void emulate_instruction(chip8_t *chip8, const config_t config)
 
         case 0x0A:
             // FX0A: A key press is awaited, and then stored in VX
-            bool any_key_pressed = false;
+            static bool any_key_pressed = false;
+            static uint8_t key = 0xFF;
             uint8_t i;
-            for (i = 0; i < sizeof(chip8->keypad); ++i) 
+            for (i = 0; (key == 0xFF) && (i < sizeof(chip8->keypad)); ++i) 
                 if (chip8->keypad[i]) {
-                    chip8->V[chip8->inst.X] = i;
+                    key = i;
                     any_key_pressed = true;
                     break;
                 }
-            if (!any_key_pressed) // Run the same opcode if no key has been pressed yet
-                chip8->PC -= 2;
 
+            // Run the same opcode if no key has been pressed yet
+            if (!any_key_pressed) {
+                chip8->PC -= 2;
+            } else {
+                if (chip8->keypad[key]) {
+                    chip8->PC -= 2;
+                }
+                else {
+                    chip8->V[chip8->inst.X] = key;
+                    key = 0xFF;
+                    any_key_pressed = false;
+                }
+            } 
             break;
 
         case 0x15:
@@ -979,18 +1022,26 @@ void emulate_instruction(chip8_t *chip8, const config_t config)
 
         case 0x55:
             // FX55: Stores from V0 to VX (including VX) in memory, starting at address I.
-            // The offset from I is increased by 1 for each value written,
-            // but I itself is left unmodified (SCHIP).
-            for (i = 0; i <= chip8->inst.X; ++i)
-                chip8->ram[chip8->I + i] = chip8->V[i];
+            // The offset from I is increased by 1 for each value written, but I itself is left unmodified.
+            // CHIP8 does increment I, SCHIP does not increment I.
+            for (i = 0; i <= chip8->inst.X; ++i)                
+                if (config.current_extension == CHIP8)
+                    chip8->ram[chip8->I++] = chip8->V[i];
+                else 
+                    chip8->ram[chip8->I + i] = chip8->V[i];
+                
             break;
 
         case 0x65:
             // FX65: Fills from V0 to VX (including VX) with values from memory, starting at address I.
-            // The offset from I is increased by 1 for each value read,
-            // but I itself is left unmodified (SCHIP).
+            // The offset from I is increased by 1 for each value read, but I itself is left unmodified.
+            // CHIP8 does increment I, SCHIP does not increment I.
             for (i = 0; i <= chip8->inst.X; ++i)
-                chip8->V[i] = chip8->ram[chip8->I + i];
+                if (config.current_extension == CHIP8)
+                    chip8->V[i] = chip8->ram[chip8->I++];
+                else
+                    chip8->V[i] = chip8->ram[chip8->I + i];
+                
             break;
         
         default:
